@@ -224,10 +224,35 @@ let hintmap_of env sigma hdc secvars concl =
   | Some hdc ->
     fun db -> Hint_db.map_eauto env sigma ~secvars hdc concl db
 
+exception CannotTrivialEassumptionEvarHyp
+
 (** Hack to properly solve dependent evars that are typeclasses *)
 let rec e_trivial_fail_db db_list local_db secvars =
   let open Tacticals in
   let open Tacmach in
+  let trivial_eassumption =
+    Proofview.Goal.enter
+    begin fun gl ->
+      let hyps = Proofview.Goal.hyps gl in
+      let sigma = Proofview.Goal.sigma gl in
+      let concl = Tacmach.pf_concl gl in
+      if List.is_empty hyps then
+        Tacticals.tclZEROMSG (str "No applicable tactic.")
+      else
+        let not_ground = occur_existential sigma concl in
+        let map decl =
+          let id = NamedDecl.get_id decl in
+          let t = NamedDecl.get_type decl in
+          match EConstr.kind sigma t with
+          | Evar _ -> Proofview.tclZERO CannotTrivialEassumptionEvarHyp
+          | _ -> if not_ground || occur_existential sigma t then
+              Clenv.unify ~cv_pb:CUMUL ~flags:(auto_flags_of_state TransparentState.full) t <*> exact_no_check (mkVar id)
+            else
+              exact_check (mkVar id)
+        in
+        Tacticals.tclFIRST (List.map map hyps)
+    end
+      in
   let trivial_fail =
     Proofview.Goal.enter
     begin fun gl ->
@@ -247,7 +272,7 @@ let rec e_trivial_fail_db db_list local_db secvars =
     end
   in
   let tacl =
-    Eauto.e_assumption ::
+    trivial_eassumption ::
     (tclTHEN Tactics.intro trivial_fail :: [trivial_resolve])
   in
   tclSOLVE tacl
